@@ -1,0 +1,28 @@
+jetson_esp32_control:
+  ros__parameters:
+    # Serial communication
+    serial_port: "/dev/ttyUSB0"
+    baud_rate: 115200
+
+    # Steering limits (degrees)
+    max_steering: 30.0
+    min_steering: -30.0
+
+    # Speed limits (m/s)
+    max_speed: 3.0
+    min_speed: 0.0
+
+    # Filtering
+    steering_filter_alpha: 0.3  # 0.0 = no filter, 1.0 = no smoothing
+
+    # Speed reduction for high steering
+    high_steering_threshold: 20.0  # degrees
+    speed_reduction_factor: 0.5    # reduce to 50% speed
+
+    # Safety
+    timeout_threshold: 0.5  # seconds
+
+    # Topic names
+    planning_steering_topic: "desired_steering_angle"
+    planning_speed_topic: "target_speed"
+    odom_topic: "odom"
