@@ -59,6 +59,17 @@ float pid_output = 0.0;
 volatile long encoder_count = 0;
 float measured_speed = 0.0;
 
+// ========== FUNCTION PROTOTYPES ==========
+void readSerialCommands();
+void applySteering(float steering_deg);
+void applySpeedControl(float target_mps);
+void setMotorPWM(float pwm_value);
+void stopMotor();
+void updateSpeedMeasurement();
+float speedToPWM(float speed_mps);
+void resetPID();
+void IRAM_ATTR encoderISR();
+
 // ========== SETUP ==========
 void setup() {
   // Serial communication
