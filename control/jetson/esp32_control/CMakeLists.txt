@@ -11,6 +11,7 @@ find_package(ackermann_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 add_executable(esp32_control_node src/esp32_control_node.cpp)
 ament_target_dependencies(esp32_control_node
@@ -21,8 +22,16 @@ ament_target_dependencies(esp32_control_node
   std_msgs
 )
 
+add_executable(joy_to_drive src/joy_to_drive_node.cpp)
+ament_target_dependencies(joy_to_drive
+  rclcpp
+  sensor_msgs
+  ackermann_msgs
+)
+
 install(TARGETS
   esp32_control_node
+  joy_to_drive
   DESTINATION lib/${PROJECT_NAME}
 )
 
