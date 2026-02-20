@@ -27,7 +27,7 @@ public:
         // Parameters
         this->declare_parameter<int>("steering_axis",   0);     // 왼쪽 스틱 좌우
         this->declare_parameter<int>("speed_axis",      4);     // 오른쪽 스틱 상하
-        this->declare_parameter<int>("deadman_button",  5);     // RB 버튼
+        this->declare_parameter<int>("deadman_button",  4);     // LB 버튼
         this->declare_parameter<double>("max_speed",    3.0);   // m/s
         this->declare_parameter<double>("max_steering", 45.0);  // degrees
         this->declare_parameter<double>("deadzone",     0.1);
