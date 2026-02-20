@@ -29,9 +29,16 @@ ament_target_dependencies(joy_to_drive
   ackermann_msgs
 )
 
+add_executable(test_planning src/test_planning_node.cpp)
+ament_target_dependencies(test_planning
+  rclcpp
+  ackermann_msgs
+)
+
 install(TARGETS
   esp32_control_node
   joy_to_drive
+  test_planning
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -13,14 +13,14 @@
 
 // ========== PIN CONFIGURATION ==========
 #define MOTOR_PWM_PIN       25
-#define MOTOR_DIR_PIN1      27
-#define MOTOR_DIR_PIN2      26
+#define MOTOR_DIR_PIN1      26
+#define MOTOR_DIR_PIN2      27
 #define SERVO_PIN           18
 #define ENCODER_PIN_A       34
 #define ENCODER_PIN_B       35
 
 // ========== PWM CONFIGURATION ==========
-#define PWM_CHANNEL         4
+#define PWM_CHANNEL         0
 #define PWM_FREQ            1000
 #define PWM_RESOLUTION      8      // 8-bit (0-255)
 
@@ -61,10 +61,17 @@
 #define STEERING_THRESHOLD    15.0
 #define MAX_STEERING_ANGLE    45.0
 
+// ========== ENCODER CONFIGURATION ==========
+// RS555 호환 모터, 모터 샤프트 기준 PPR=11
+// ※ 엔코더가 모터 샤프트에 달려있으면 기어비 곱해야 함
+//   예: 기어비 20:1 → ENCODER_PPR = 11 * 20 = 220
+//   기어비 모를 경우: 실제 주행 후 속도 오차 보고 보정
+#define ENCODER_PPR           11      // 모터 샤프트 PPR (기어비 확인 후 수정)
+#define WHEEL_CIRCUMFERENCE_M 0.346f  // 바퀴 둘레 (m) = π × 0.11m
+
 // ========== SOFT START CONFIGURATION ==========
-#define SOFTSTART_INITIAL_PWM   50
-#define SOFTSTART_STEP          10
-#define SOFTSTART_DELAY_MS      10
+#define SOFTSTART_MIN_PWM     170    // 정지마찰 극복용 최소 시작 PWM
+#define SOFTSTART_RAMP_STEP   8      // 제어주기(50Hz)당 PWM 증가량
 
 // ========== GLOBAL VARIABLES ==========
 Servo steeringServo;
@@ -85,11 +92,12 @@ float pid_output = 0.0;
 volatile long encoder_count = 0;
 float measured_speed = 0.0;
 
+// Soft start
+float current_pwm    = 0.0;
+bool  last_forward   = true;
+
 // [수정] 논블로킹 시리얼 파싱용 버퍼
 String serial_buffer = "";
-
-// [소프트스타트] 현재 PWM 상태 추적
-int current_pwm_state = 0;
 
 // ========== FUNCTION PROTOTYPES ==========
 void readSerialCommands();
@@ -280,35 +288,47 @@ void updateAdaptiveGains(float speed, float steering_deg) {
 
 // ========== MOTOR DRIVER ==========
 void setMotorPWM(float pwm_value) {
-  bool forward = (pwm_value >= 0);
-  int pwm_abs = (int)constrain(abs(pwm_value), MIN_PWM, MAX_PWM);
+  bool  forward    = (pwm_value >= 0);
+  float target_abs = abs(pwm_value);
 
-  if (pwm_abs < 10) {
+  // 정지
+  if (target_abs < 10) {
+    current_pwm = 0.0;
     stopMotor();
     return;
   }
 
-  digitalWrite(MOTOR_DIR_PIN1, forward ? HIGH : LOW);
-  digitalWrite(MOTOR_DIR_PIN2, forward ? LOW  : HIGH);
-
-  // [소프트스타트] 정지 상태에서 시작할 때 220까지 킥 후 목표 PWM으로 안정화
-  if (current_pwm_state == 0) {
-    int kick_pwm = max(pwm_abs, 220);
-    for (int pwm = SOFTSTART_INITIAL_PWM; pwm <= kick_pwm; pwm += SOFTSTART_STEP) {
-      ledcWrite(PWM_CHANNEL, pwm);
-      delay(SOFTSTART_DELAY_MS);
-    }
+  // 방향 전환 시 PWM 리셋 (급격한 역전 방지)
+  if (forward != last_forward) {
+    current_pwm  = 0.0;
+    last_forward = forward;
   }
 
-  ledcWrite(PWM_CHANNEL, pwm_abs);
-  current_pwm_state = pwm_abs;
+  // 소프트스타트: 0에서 출발 시 최소 PWM으로 킥스타트
+  if (current_pwm < 1.0) {
+    current_pwm = SOFTSTART_MIN_PWM;
+  }
+  // 목표 PWM까지 점진적 증가 (ramp up)
+  else if (current_pwm < target_abs) {
+    current_pwm = min(current_pwm + SOFTSTART_RAMP_STEP, target_abs);
+  }
+  // 목표 PWM 초과 시 즉시 감소
+  else {
+    current_pwm = target_abs;
+  }
+
+  int pwm_int = (int)constrain(current_pwm, MIN_PWM, MAX_PWM);
+
+  digitalWrite(MOTOR_DIR_PIN1, forward ? HIGH : LOW);
+  digitalWrite(MOTOR_DIR_PIN2, forward ? LOW  : HIGH);
+  ledcWrite(PWM_CHANNEL, pwm_int);
 }
 
 void stopMotor() {
+  current_pwm = 0.0;
   digitalWrite(MOTOR_DIR_PIN1, LOW);
   digitalWrite(MOTOR_DIR_PIN2, LOW);
   ledcWrite(PWM_CHANNEL, 0);
-  current_pwm_state = 0;  // [소프트스타트] 정지 시 상태 초기화
 }
 
 // ========== SPEED MEASUREMENT ==========
@@ -319,9 +339,16 @@ void updateSpeedMeasurement() {
     float dt = (now - last_speed_update) / 1000.0;
 
     if (dt > 0.1) {
-      // measured_speed = (encoder_count * wheel_circumference) / (encoder_ppr * dt);
+      long count = encoder_count;
       encoder_count = 0;
       last_speed_update = now;
+
+      // 실제 속도 계산: 펄스 수 → m/s
+      float revolutions = (float)abs(count) / (float)ENCODER_PPR;
+      float speed_abs = revolutions * WHEEL_CIRCUMFERENCE_M / dt;
+
+      // 방향은 모터 명령 방향으로 결정
+      measured_speed = (target_speed >= 0) ? speed_abs : -speed_abs;
     }
   #else
     measured_speed = target_speed;
@@ -329,15 +356,18 @@ void updateSpeedMeasurement() {
 }
 
 void IRAM_ATTR encoderISR() {
-  encoder_count++;
+  // B핀으로 방향 감지: B=HIGH이면 정방향, B=LOW이면 역방향
+  if (digitalRead(ENCODER_PIN_B) == HIGH) {
+    encoder_count++;
+  } else {
+    encoder_count--;
+  }
 }
 
 // ========== UTILITY ==========
 float speedToPWM(float speed_mps) {
-  if (abs(speed_mps) < 0.01) return 0;
-  float sign = (speed_mps > 0) ? 1.0 : -1.0;
-  float pwm = 150.0 + (abs(speed_mps) / MAX_SPEED_MPS) * 70.0;
-  return constrain(sign * pwm, -MAX_PWM, MAX_PWM);
+  float pwm = speed_mps * 85.0;
+  return constrain(pwm, -MAX_PWM, MAX_PWM);
 }
 
 void resetPID() {
