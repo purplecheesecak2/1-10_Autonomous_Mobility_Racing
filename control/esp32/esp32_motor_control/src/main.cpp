@@ -2,174 +2,167 @@
  * ESP32 Motor Control with Adaptive PID
  * Receives commands from Jetson via Serial
  * Controls motor driver with adaptive PID speed control
- *
- * [수정사항]
- * 1. SPEED 피드백 전송 추가 (readSerialFeedback 대응)
- * 2. 속도 감쇄 제거 → Jetson에서 일괄 처리
- * 3. Serial.readStringUntil() 블로킹 → 논블로킹 방식으로 교체
  */
 
 #include <ESP32Servo.h>
 
 // ========== PIN CONFIGURATION ==========
-#define MOTOR_PWM_PIN       25
-#define MOTOR_DIR_PIN1      26
-#define MOTOR_DIR_PIN2      27
-#define SERVO_PIN           18
-#define ENCODER_PIN_A       34
-#define ENCODER_PIN_B       35
+#define MOTOR_PWM_PIN       25    // DC motor PWM
+#define MOTOR_DIR_PIN1      27    // Motor direction 1
+#define MOTOR_DIR_PIN2      26    // Motor direction 2
+#define SERVO_PIN           18    // Steering servo
+#define ENCODER_PIN_A       34    // Speed encoder (optional)
+#define ENCODER_PIN_B       35    // Speed encoder (optional)
 
 // ========== PWM CONFIGURATION ==========
-#define PWM_CHANNEL         0
-#define PWM_FREQ            1000
+#define PWM_CHANNEL         4
+#define PWM_FREQ            1000   // 1kHz
 #define PWM_RESOLUTION      8      // 8-bit (0-255)
 
 // ========== PARAMETERS ==========
 #define SERIAL_BAUD         115200
-#define TIMEOUT_MS          500
-#define CONTROL_RATE_HZ     50
-#define FEEDBACK_RATE_HZ    10     // 피드백 전송 주기 (10Hz로 충분)
+#define TIMEOUT_MS          500    // Stop if no command for 500ms
+#define CONTROL_RATE_HZ     50     // 50Hz control loop
 
-// Steering limits
-#define SERVO_MIN_ANGLE     60
+// Steering limits (degrees)
+#define SERVO_MIN_ANGLE     60     // Adjust to your servo
 #define SERVO_MAX_ANGLE     120
 #define SERVO_CENTER        90
 
 // Speed limits
 #define MAX_SPEED_MPS       3.0
-#define MIN_SPEED_MPS       -3.0
+#define MIN_SPEED_MPS       -3.0   // Negative = reverse
 #define MAX_PWM             255
 #define MIN_PWM             0
 
 // ========== ADAPTIVE PID CONFIGURATION ==========
+// Base PID gains (tune these first!)
 #define BASE_KP             50.0
 #define BASE_KI             10.0
 #define BASE_KD             5.0
 
-#define LOW_SPEED_THRESHOLD   1.0
-#define HIGH_SPEED_THRESHOLD  2.5
+// Speed-based gain scaling thresholds
+#define LOW_SPEED_THRESHOLD   1.0   // m/s - 이 속도 이하는 저속
+#define HIGH_SPEED_THRESHOLD  2.5   // m/s - 이 속도 이상은 고속
 
-#define LOW_SPEED_KP_SCALE    1.3
+// Speed-based gain multipliers (실차 테스트로 조정)
+#define LOW_SPEED_KP_SCALE    1.3   // 저속: 빠른 응답
 #define LOW_SPEED_KI_SCALE    1.2
 #define LOW_SPEED_KD_SCALE    0.8
 
-#define HIGH_SPEED_KP_SCALE   0.7
+#define HIGH_SPEED_KP_SCALE   0.7   // 고속: 안정성 우선
 #define HIGH_SPEED_KI_SCALE   0.5
 #define HIGH_SPEED_KD_SCALE   1.2
 
-// [수정] 조향 기반 게인 감쇄만 유지 (속도 감쇄는 Jetson으로 이관)
-#define STEERING_THRESHOLD    15.0
-#define MAX_STEERING_ANGLE    45.0
-
-// ========== ENCODER CONFIGURATION ==========
-// RS555 호환 모터, 모터 샤프트 기준 PPR=11
-// ※ 엔코더가 모터 샤프트에 달려있으면 기어비 곱해야 함
-//   예: 기어비 20:1 → ENCODER_PPR = 11 * 20 = 220
-//   기어비 모를 경우: 실제 주행 후 속도 오차 보고 보정
-#define ENCODER_PPR           11      // 모터 샤프트 PPR (기어비 확인 후 수정)
-#define WHEEL_CIRCUMFERENCE_M 0.346f  // 바퀴 둘레 (m) = π × 0.11m
-
-// ========== SOFT START CONFIGURATION ==========
-#define SOFTSTART_MIN_PWM     170    // 정지마찰 극복용 최소 시작 PWM
-#define SOFTSTART_RAMP_STEP   8      // 제어주기(50Hz)당 PWM 증가량
+// Steering-based speed limiting
+#define STEERING_THRESHOLD    15.0  // degrees - 이 각도 이상이면 큰 조향
+#define MAX_STEERING_ANGLE    45.0  // degrees
+#define SPEED_REDUCTION_FACTOR 0.6  // 큰 조향 시 속도를 60%까지 제한
 
 // ========== GLOBAL VARIABLES ==========
 Servo steeringServo;
 
-float target_steering = 0.0;
-float target_speed = 0.0;
+// Command from Jetson
+float target_steering = 0.0;  // degrees
+float target_speed = 0.0;     // m/s
+float adjusted_target_speed = 0.0;  // 조향각 보정 후 목표 속도
 unsigned long last_command_time = 0;
 
+// Adaptive PID variables
 float current_kp = BASE_KP;
 float current_ki = BASE_KI;
 float current_kd = BASE_KD;
 
+// PID variables
+float current_speed = 0.0;
 float speed_error = 0.0;
 float speed_error_sum = 0.0;
 float speed_error_prev = 0.0;
 float pid_output = 0.0;
 
+// Encoder (if available)
 volatile long encoder_count = 0;
 float measured_speed = 0.0;
-
-// Soft start
-float current_pwm    = 0.0;
-bool  last_forward   = true;
-
-// [수정] 논블로킹 시리얼 파싱용 버퍼
-String serial_buffer = "";
 
 // ========== FUNCTION PROTOTYPES ==========
 void readSerialCommands();
 void applySteering(float steering_deg);
-void applyAdaptiveSpeedControl(float target_mps);
+void applyAdaptiveSpeedControl(float target_mps, float steering_deg);
 void updateAdaptiveGains(float speed, float steering_deg);
+float adjustSpeedForSteering(float target_mps, float steering_deg);
 void setMotorPWM(float pwm_value);
 void stopMotor();
 void updateSpeedMeasurement();
 float speedToPWM(float speed_mps);
 void resetPID();
-void sendSpeedFeedback();           // [추가]
 void IRAM_ATTR encoderISR();
 void printAdaptiveStatus();
 
 // ========== SETUP ==========
 void setup() {
+  // Serial communication
   Serial.begin(SERIAL_BAUD);
   Serial.println("ESP32 Adaptive Motor Control Started");
 
+  // Motor pins
   pinMode(MOTOR_DIR_PIN1, OUTPUT);
   pinMode(MOTOR_DIR_PIN2, OUTPUT);
 
+  // PWM setup
   ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(MOTOR_PWM_PIN, PWM_CHANNEL);
 
+  // Servo setup
   steeringServo.attach(SERVO_PIN);
   steeringServo.write(SERVO_CENTER);
 
+  // Encoder pins (optional)
   pinMode(ENCODER_PIN_A, INPUT_PULLUP);
   pinMode(ENCODER_PIN_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_A), encoderISR, RISING);
 
+  // Initialize
   stopMotor();
 
   Serial.println("Initialization complete. Waiting for commands...");
+  Serial.println("Adaptive PID enabled:");
+  Serial.println("  - Speed-based gain scaling");
+  Serial.println("  - Steering-based speed limiting");
 }
 
 // ========== MAIN LOOP ==========
 void loop() {
   static unsigned long last_control_time = 0;
-  static unsigned long last_feedback_time = 0;
   static unsigned long last_print_time = 0;
   unsigned long current_time = millis();
 
-  // [수정] 논블로킹 시리얼 읽기
+  // Read commands from Serial
   readSerialCommands();
 
-  // Timeout 체크
+  // Check timeout
   if (current_time - last_command_time > TIMEOUT_MS) {
+    // Timeout: stop motor
     stopMotor();
     steeringServo.write(SERVO_CENTER);
     resetPID();
     return;
   }
 
-  // 제어 루프 (50Hz)
+  // Control loop at fixed rate
   if (current_time - last_control_time >= (1000 / CONTROL_RATE_HZ)) {
     last_control_time = current_time;
 
+    // Update speed measurement (from encoder or estimate)
     updateSpeedMeasurement();
+
+    // Apply steering
     applySteering(target_steering);
-    applyAdaptiveSpeedControl(target_speed);  // [수정] 조향 인자 제거
+
+    // Apply adaptive speed control
+    applyAdaptiveSpeedControl(target_speed, target_steering);
   }
 
-  // [추가] 속도 피드백 전송 (10Hz)
-  if (current_time - last_feedback_time >= (1000 / FEEDBACK_RATE_HZ)) {
-    last_feedback_time = current_time;
-    sendSpeedFeedback();
-  }
-
-  // 디버그 출력 (1Hz)
+  // Debug print (1Hz)
   if (current_time - last_print_time >= 1000) {
     last_print_time = current_time;
     printAdaptiveStatus();
@@ -177,155 +170,171 @@ void loop() {
 }
 
 // ========== SERIAL COMMUNICATION ==========
-// [수정] 논블로킹 방식: available() 로 1바이트씩 읽어 \n 감지 시 파싱
 void readSerialCommands() {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
+  if (Serial.available() > 0) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
 
-    if (c == '\n') {
-      serial_buffer.trim();
+    // Parse CSV: "steering,speed"
+    int comma_index = line.indexOf(',');
+    if (comma_index > 0) {
+      String steering_str = line.substring(0, comma_index);
+      String speed_str = line.substring(comma_index + 1);
 
-      int comma_index = serial_buffer.indexOf(',');
-      if (comma_index > 0) {
-        float new_steering = serial_buffer.substring(0, comma_index).toFloat();
-        float new_speed    = serial_buffer.substring(comma_index + 1).toFloat();
+      float new_steering = steering_str.toFloat();
+      float new_speed = speed_str.toFloat();
 
-        if (!isnan(new_steering) && !isnan(new_speed)) {
-          target_steering = constrain(new_steering, -45.0, 45.0);
-          target_speed    = constrain(new_speed, MIN_SPEED_MPS, MAX_SPEED_MPS);
-          last_command_time = millis();
-        }
-      }
-
-      serial_buffer = "";  // 버퍼 초기화
-    } else {
-      serial_buffer += c;
-
-      // 버퍼 오버플로 방지
-      if (serial_buffer.length() > 64) {
-        serial_buffer = "";
+      // Validate
+      if (!isnan(new_steering) && !isnan(new_speed)) {
+        target_steering = constrain(new_steering, -45.0, 45.0);
+        target_speed = constrain(new_speed, MIN_SPEED_MPS, MAX_SPEED_MPS);
+        last_command_time = millis();
       }
     }
   }
 }
 
-// ========== SPEED FEEDBACK ==========
-// [추가] Jetson readSerialFeedback()의 "SPEED:x.xx\n" 포맷에 대응
-void sendSpeedFeedback() {
-  Serial.print("SPEED:");
-  Serial.println(measured_speed, 2);
-}
-
 // ========== STEERING CONTROL ==========
 void applySteering(float steering_deg) {
+  // Convert steering angle to servo angle
+  // steering_deg: -45 to +45 (left to right)
+  // servo: SERVO_MIN_ANGLE to SERVO_MAX_ANGLE
+
   float servo_angle = map(steering_deg * 100, -4500, 4500,
                           SERVO_MIN_ANGLE * 100, SERVO_MAX_ANGLE * 100) / 100.0;
+
   servo_angle = constrain(servo_angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   steeringServo.write((int)servo_angle);
 }
 
 // ========== ADAPTIVE SPEED CONTROL ==========
-// [수정] adjustSpeedForSteering 제거 → Jetson이 이미 처리한 속도를 그대로 사용
-void applyAdaptiveSpeedControl(float target_mps) {
-  updateAdaptiveGains(measured_speed, target_steering);
+void applyAdaptiveSpeedControl(float target_mps, float steering_deg) {
+  // 1. 조향각에 따라 목표 속도 조정
+  adjusted_target_speed = adjustSpeedForSteering(target_mps, steering_deg);
+  
+  // 2. 현재 속도와 조향각에 따라 PID 게인 조정
+  updateAdaptiveGains(measured_speed, steering_deg);
 
+  // 3. PID 계산
   #ifdef USE_ENCODER_FEEDBACK
-    speed_error = target_mps - measured_speed;
+    // PID control with encoder feedback
+    speed_error = adjusted_target_speed - measured_speed;
     speed_error_sum += speed_error * (1.0 / CONTROL_RATE_HZ);
     float speed_error_derivative = (speed_error - speed_error_prev) * CONTROL_RATE_HZ;
     speed_error_prev = speed_error;
 
+    // Anti-windup
     speed_error_sum = constrain(speed_error_sum, -10.0, 10.0);
 
-    pid_output = current_kp * speed_error +
-                 current_ki * speed_error_sum +
+    // Adaptive PID 적용
+    pid_output = current_kp * speed_error + 
+                 current_ki * speed_error_sum + 
                  current_kd * speed_error_derivative;
   #else
-    pid_output = speedToPWM(target_mps);
+    // Open-loop: direct mapping from speed to PWM
+    pid_output = speedToPWM(adjusted_target_speed);
   #endif
 
+  // 4. 모터에 적용
   setMotorPWM(pid_output);
 }
 
 // ========== ADAPTIVE GAIN ADJUSTMENT ==========
-// [수정] 속도 감쇄 로직 제거, 게인 조정만 담당
 void updateAdaptiveGains(float speed, float steering_deg) {
-  float abs_speed    = abs(speed);
+  float abs_speed = abs(speed);
   float abs_steering = abs(steering_deg);
-
+  
   // 속도 기반 게인 스케일링
-  float speed_scale_kp, speed_scale_ki, speed_scale_kd;
-
+  float speed_scale_kp = 1.0;
+  float speed_scale_ki = 1.0;
+  float speed_scale_kd = 1.0;
+  
   if (abs_speed < LOW_SPEED_THRESHOLD) {
+    // 저속: 공격적인 게인
     speed_scale_kp = LOW_SPEED_KP_SCALE;
     speed_scale_ki = LOW_SPEED_KI_SCALE;
     speed_scale_kd = LOW_SPEED_KD_SCALE;
-  } else if (abs_speed > HIGH_SPEED_THRESHOLD) {
+  } 
+  else if (abs_speed > HIGH_SPEED_THRESHOLD) {
+    // 고속: 보수적인 게인
     speed_scale_kp = HIGH_SPEED_KP_SCALE;
     speed_scale_ki = HIGH_SPEED_KI_SCALE;
     speed_scale_kd = HIGH_SPEED_KD_SCALE;
-  } else {
-    float ratio = (abs_speed - LOW_SPEED_THRESHOLD) /
-                  (HIGH_SPEED_THRESHOLD - LOW_SPEED_THRESHOLD);
-    speed_scale_kp = LOW_SPEED_KP_SCALE + ratio * (HIGH_SPEED_KP_SCALE - LOW_SPEED_KP_SCALE);
-    speed_scale_ki = LOW_SPEED_KI_SCALE + ratio * (HIGH_SPEED_KI_SCALE - LOW_SPEED_KI_SCALE);
-    speed_scale_kd = LOW_SPEED_KD_SCALE + ratio * (HIGH_SPEED_KD_SCALE - LOW_SPEED_KD_SCALE);
   }
-
-  // 조향각 기반 게인 감쇄 (큰 조향 시 부드럽게)
+  else {
+    // 중속: 선형 보간
+    float ratio = (abs_speed - LOW_SPEED_THRESHOLD) / 
+                  (HIGH_SPEED_THRESHOLD - LOW_SPEED_THRESHOLD);
+    speed_scale_kp = LOW_SPEED_KP_SCALE + 
+                     ratio * (HIGH_SPEED_KP_SCALE - LOW_SPEED_KP_SCALE);
+    speed_scale_ki = LOW_SPEED_KI_SCALE + 
+                     ratio * (HIGH_SPEED_KI_SCALE - LOW_SPEED_KI_SCALE);
+    speed_scale_kd = LOW_SPEED_KD_SCALE + 
+                     ratio * (HIGH_SPEED_KD_SCALE - LOW_SPEED_KD_SCALE);
+  }
+  
+  // 조향각 기반 게인 조정 (큰 조향각일 때 부드럽게)
   float steering_factor = 1.0;
   if (abs_steering > STEERING_THRESHOLD) {
-    float steering_ratio = (abs_steering - STEERING_THRESHOLD) /
+    // 조향각이 클수록 게인을 더 낮춤 (0.7 ~ 1.0 범위)
+    float steering_ratio = (abs_steering - STEERING_THRESHOLD) / 
                            (MAX_STEERING_ANGLE - STEERING_THRESHOLD);
-    steering_ratio  = constrain(steering_ratio, 0.0, 1.0);
-    steering_factor = 1.0 - (steering_ratio * 0.3);
+    steering_ratio = constrain(steering_ratio, 0.0, 1.0);
+    steering_factor = 1.0 - (steering_ratio * 0.3);  // 최대 30% 감소
   }
-
+  
+  // 최종 게인 계산
   current_kp = BASE_KP * speed_scale_kp * steering_factor;
   current_ki = BASE_KI * speed_scale_ki * steering_factor;
   current_kd = BASE_KD * speed_scale_kd * steering_factor;
 }
 
+// ========== STEERING-BASED SPEED LIMITING ==========
+float adjustSpeedForSteering(float target_mps, float steering_deg) {
+  float abs_steering = abs(steering_deg);
+  
+  // 조향각이 작으면 속도 제한 없음
+  if (abs_steering < STEERING_THRESHOLD) {
+    return target_mps;
+  }
+  
+  // 조향각이 클수록 속도 제한 (선형 감소)
+  float steering_ratio = (abs_steering - STEERING_THRESHOLD) / 
+                         (MAX_STEERING_ANGLE - STEERING_THRESHOLD);
+  steering_ratio = constrain(steering_ratio, 0.0, 1.0);
+  
+  // 최대 조향각일 때 SPEED_REDUCTION_FACTOR까지 감소
+  float speed_limit_factor = 1.0 - (steering_ratio * (1.0 - SPEED_REDUCTION_FACTOR));
+  
+  float adjusted_speed = target_mps * speed_limit_factor;
+  
+  return adjusted_speed;
+}
+
 // ========== MOTOR DRIVER ==========
 void setMotorPWM(float pwm_value) {
-  bool  forward    = (pwm_value >= 0);
-  float target_abs = abs(pwm_value);
+  // Determine direction
+  bool forward = (pwm_value >= 0);
+  int pwm_abs = (int)constrain(abs(pwm_value), MIN_PWM, MAX_PWM);
 
-  // 정지
-  if (target_abs < 10) {
-    current_pwm = 0.0;
+  if (pwm_abs < 10) {
+    // Dead zone: stop
     stopMotor();
     return;
   }
 
-  // 방향 전환 시 PWM 리셋 (급격한 역전 방지)
-  if (forward != last_forward) {
-    current_pwm  = 0.0;
-    last_forward = forward;
+  if (forward) {
+    digitalWrite(MOTOR_DIR_PIN1, HIGH);
+    digitalWrite(MOTOR_DIR_PIN2, LOW);
+  } else {
+    digitalWrite(MOTOR_DIR_PIN1, LOW);
+    digitalWrite(MOTOR_DIR_PIN2, HIGH);
   }
 
-  // 소프트스타트: 0에서 출발 시 최소 PWM으로 킥스타트
-  if (current_pwm < 1.0) {
-    current_pwm = SOFTSTART_MIN_PWM;
-  }
-  // 목표 PWM까지 점진적 증가 (ramp up)
-  else if (current_pwm < target_abs) {
-    current_pwm = min(current_pwm + SOFTSTART_RAMP_STEP, target_abs);
-  }
-  // 목표 PWM 초과 시 즉시 감소
-  else {
-    current_pwm = target_abs;
-  }
-
-  int pwm_int = (int)constrain(current_pwm, MIN_PWM, MAX_PWM);
-
-  digitalWrite(MOTOR_DIR_PIN1, forward ? HIGH : LOW);
-  digitalWrite(MOTOR_DIR_PIN2, forward ? LOW  : HIGH);
-  ledcWrite(PWM_CHANNEL, pwm_int);
+  ledcWrite(PWM_CHANNEL, pwm_abs);
 }
 
 void stopMotor() {
-  current_pwm = 0.0;
   digitalWrite(MOTOR_DIR_PIN1, LOW);
   digitalWrite(MOTOR_DIR_PIN2, LOW);
   ledcWrite(PWM_CHANNEL, 0);
@@ -333,59 +342,70 @@ void stopMotor() {
 
 // ========== SPEED MEASUREMENT ==========
 void updateSpeedMeasurement() {
+  // If encoder available, calculate speed from encoder counts
+  // For now, just estimate or use open-loop
+
   #ifdef USE_ENCODER_FEEDBACK
     static unsigned long last_speed_update = 0;
     unsigned long now = millis();
     float dt = (now - last_speed_update) / 1000.0;
 
-    if (dt > 0.1) {
-      long count = encoder_count;
-      encoder_count = 0;
+    if (dt > 0.1) {  // Update every 100ms
+      // Calculate speed from encoder
+      // measured_speed = (encoder_count * wheel_circumference) / (encoder_ppr * dt);
+      encoder_count = 0;  // Reset
       last_speed_update = now;
-
-      // 실제 속도 계산: 펄스 수 → m/s
-      float revolutions = (float)abs(count) / (float)ENCODER_PPR;
-      float speed_abs = revolutions * WHEEL_CIRCUMFERENCE_M / dt;
-
-      // 방향은 모터 명령 방향으로 결정
-      measured_speed = (target_speed >= 0) ? speed_abs : -speed_abs;
     }
   #else
+    // Open-loop: assume we're at target speed (no feedback)
     measured_speed = target_speed;
   #endif
 }
 
+// Encoder interrupt
 void IRAM_ATTR encoderISR() {
-  // B핀으로 방향 감지: B=HIGH이면 정방향, B=LOW이면 역방향
-  if (digitalRead(ENCODER_PIN_B) == HIGH) {
-    encoder_count++;
-  } else {
-    encoder_count--;
-  }
+  encoder_count++;
 }
 
-// ========== UTILITY ==========
+// ========== UTILITY FUNCTIONS ==========
 float speedToPWM(float speed_mps) {
+  // Simple linear mapping (tune this for your motor!)
+  // Assumes: 1 m/s ≈ 85 PWM (example, adjust for your setup)
   float pwm = speed_mps * 85.0;
   return constrain(pwm, -MAX_PWM, MAX_PWM);
 }
 
 void resetPID() {
-  speed_error      = 0.0;
-  speed_error_sum  = 0.0;
+  speed_error = 0.0;
+  speed_error_sum = 0.0;
   speed_error_prev = 0.0;
-  pid_output       = 0.0;
+  pid_output = 0.0;
 }
 
 // ========== DEBUG ==========
 void printAdaptiveStatus() {
   Serial.println("=== Adaptive Control Status ===");
-  Serial.print("Target Speed: ");   Serial.println(target_speed, 2);
-  Serial.print("Measured Speed: "); Serial.println(measured_speed, 2);
-  Serial.print("Steering: ");       Serial.print(target_steering, 1); Serial.println(" deg");
-  Serial.print("Kp: "); Serial.print(current_kp, 1);
-  Serial.print(" Ki: "); Serial.print(current_ki, 1);
-  Serial.print(" Kd: "); Serial.println(current_kd, 1);
-  Serial.print("PWM Output: ");     Serial.println(pid_output, 1);
+  Serial.print("Target Speed: ");
+  Serial.print(target_speed, 2);
+  Serial.print(" -> Adjusted: ");
+  Serial.println(adjusted_target_speed, 2);
+  
+  Serial.print("Steering: ");
+  Serial.print(target_steering, 1);
+  Serial.println(" deg");
+  
+  Serial.print("Adaptive Gains - Kp: ");
+  Serial.print(current_kp, 1);
+  Serial.print(" Ki: ");
+  Serial.print(current_ki, 1);
+  Serial.print(" Kd: ");
+  Serial.println(current_kd, 1);
+  
+  Serial.print("PWM Output: ");
+  Serial.println(pid_output, 1);
   Serial.println();
+
+  // Jetson parseFeedbackLine() 이 파싱하는 형식
+  Serial.print("SPEED:");
+  Serial.println(measured_speed, 2);
 }
