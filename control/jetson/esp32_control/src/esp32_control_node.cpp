@@ -7,7 +7,7 @@
  *
  * [수정사항]
  * 1. serial/serial.h → POSIX termios (추가 라이브러리 불필요)
- * 2. 속도 감쇄 로직을 Jetson에서만 처리 (ESP32 측 제거에 대응)
+ * 2. 속도 감쇄 로직 중복 제거 → ESP32(main.cpp)에서만 처리
  * 3. readline() 블로킹 → available() + read() 논블로킹 방식으로 교체
  * 4. /odom → /ego_racecar/odom (planning node 토픽 이름 맞춤)
  */
@@ -39,8 +39,6 @@ public:
         this->declare_parameter<double>("max_speed", 3.0);
         this->declare_parameter<double>("min_speed", -3.0);
         this->declare_parameter<double>("steering_filter_alpha", 0.3);
-        this->declare_parameter<double>("high_steering_threshold", 20.0);
-        this->declare_parameter<double>("speed_reduction_factor", 0.5);
         this->declare_parameter<double>("timeout_threshold", 0.5);
 
         serial_port_             = this->get_parameter("serial_port").as_string();
@@ -50,8 +48,6 @@ public:
         max_speed_               = this->get_parameter("max_speed").as_double();
         min_speed_               = this->get_parameter("min_speed").as_double();
         steering_filter_alpha_   = this->get_parameter("steering_filter_alpha").as_double();
-        high_steering_threshold_ = this->get_parameter("high_steering_threshold").as_double();
-        speed_reduction_factor_  = this->get_parameter("speed_reduction_factor").as_double();
         timeout_threshold_       = this->get_parameter("timeout_threshold").as_double();
 
         // Serial 초기화
@@ -106,8 +102,6 @@ private:
     double max_steering_, min_steering_;
     double max_speed_, min_speed_;
     double steering_filter_alpha_;
-    double high_steering_threshold_;
-    double speed_reduction_factor_;
     double timeout_threshold_;
 
     double desired_steering_ = 0.0;
@@ -256,20 +250,6 @@ private:
         return filtered_steering_;
     }
 
-    // 속도 감쇄: Jetson에서만 처리 (선형 감쇄)
-    double adjustSpeedForSteering(double speed, double steering) {
-        double abs_steering = std::abs(steering);
-        if (abs_steering <= high_steering_threshold_) return speed;
-
-        double max_steering = 45.0;
-        double ratio = (abs_steering - high_steering_threshold_) /
-                       (max_steering - high_steering_threshold_);
-        ratio = std::max(0.0, std::min(1.0, ratio));
-
-        double factor = 1.0 - ratio * (1.0 - speed_reduction_factor_);
-        return speed * factor;
-    }
-
     bool checkTimeout() {
         if (!received_drive_) return false;
         double dt = (this->now() - last_drive_time_).seconds();
@@ -310,10 +290,9 @@ private:
             double limited_steering = limitSteering(desired_steering_);
             double filtered         = filterSteering(limited_steering);
             double limited_speed    = limitSpeed(target_speed_);
-            double adjusted_speed   = adjustSpeedForSteering(limited_speed, filtered);
 
             final_steering = filtered;
-            final_speed    = adjusted_speed;
+            final_speed    = limited_speed;  // 속도 감쇄는 ESP32에서 처리
         }
 
         sendToESP32(final_steering, final_speed);
