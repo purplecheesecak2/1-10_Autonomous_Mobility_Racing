@@ -36,7 +36,7 @@ public:
         this->declare_parameter<double>("max_steering",  45.0);
         this->declare_parameter<double>("deadzone",      0.1);
         this->declare_parameter<bool>("invert_steering", true);
-        this->declare_parameter<bool>("invert_speed",    false);
+        this->declare_parameter<bool>("invert_speed",    true);
 
         steering_axis_       = this->get_parameter("steering_axis").as_int();
         speed_axis_          = this->get_parameter("speed_axis").as_int();
