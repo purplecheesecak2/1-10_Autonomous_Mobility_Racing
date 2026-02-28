@@ -293,7 +293,7 @@ void updateAdaptiveGains(float speed, float steering_deg) {
     float steering_ratio = (abs_steering - STEERING_THRESHOLD) / 
                            (MAX_STEERING_ANGLE - STEERING_THRESHOLD);
     steering_ratio = constrain(steering_ratio, 0.0, 1.0);
-    steering_factor = 1.0 - (steering_ratio * 0.3);  // 최대 30% 감소
+    steering_factor = 1.0 - (steering_ratio * 0.1);  // 최대 10% 감소
   }
   
   // 최종 게인 계산
