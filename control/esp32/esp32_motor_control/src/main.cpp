@@ -35,6 +35,13 @@
 #define MAX_PWM             255
 #define MIN_PWM             0
 
+// ========== ENCODER CONFIGURATION ==========
+// TODO: 캘리브레이션 필요
+// 측정 방법: 바퀴를 정확히 1회전시키고 시리얼 모니터의 "ENC_RAW:" 값을 확인
+// ENCODER_PPR = 그 값으로 교체
+#define ENCODER_PPR           139        // 캘리브레이션 완료 (5회전 측정: 695펄스 ÷ 5)
+#define WHEEL_CIRCUMFERENCE_M 0.3456f   // π × 0.11m (바퀴 지름 11cm)
+
 // ========== ADAPTIVE PID CONFIGURATION ==========
 // Base PID gains (tune these first!)
 #define BASE_KP             50.0
@@ -83,6 +90,7 @@ float pid_output = 0.0;
 // Encoder (if available)
 volatile long encoder_count = 0;
 float measured_speed = 0.0;
+bool motor_going_forward = true;  // 방향 추적 (속도 부호 결정용)
 
 // ========== FUNCTION PROTOTYPES ==========
 void readSerialCommands();
@@ -139,6 +147,12 @@ void loop() {
   // Read commands from Serial
   readSerialCommands();
 
+  // Debug print (1Hz) - timeout과 무관하게 항상 출력
+  if (current_time - last_print_time >= 1000) {
+    last_print_time = current_time;
+    printAdaptiveStatus();
+  }
+
   // Check timeout
   if (current_time - last_command_time > TIMEOUT_MS) {
     // Timeout: stop motor
@@ -160,12 +174,6 @@ void loop() {
 
     // Apply adaptive speed control
     applyAdaptiveSpeedControl(target_speed, target_steering);
-  }
-
-  // Debug print (1Hz)
-  if (current_time - last_print_time >= 1000) {
-    last_print_time = current_time;
-    printAdaptiveStatus();
   }
 }
 
@@ -323,6 +331,8 @@ void setMotorPWM(float pwm_value) {
     return;
   }
 
+  motor_going_forward = forward;
+
   if (forward) {
     digitalWrite(MOTOR_DIR_PIN1, HIGH);
     digitalWrite(MOTOR_DIR_PIN2, LOW);
@@ -347,14 +357,19 @@ void updateSpeedMeasurement() {
 
   #ifdef USE_ENCODER_FEEDBACK
     static unsigned long last_speed_update = 0;
+    static long last_enc_raw = 0;
     unsigned long now = millis();
     float dt = (now - last_speed_update) / 1000.0;
 
-    if (dt > 0.1) {  // Update every 100ms
-      // Calculate speed from encoder
-      // measured_speed = (encoder_count * wheel_circumference) / (encoder_ppr * dt);
-      encoder_count = 0;  // Reset
+    if (dt > 0.1) {  // 100ms마다 갱신
+      long count = encoder_count;
+      encoder_count = 0;
       last_speed_update = now;
+      last_enc_raw = count;  // 캘리브레이션용
+
+      float speed_magnitude = (float)abs(count) * WHEEL_CIRCUMFERENCE_M
+                              / ((float)ENCODER_PPR * dt);
+      measured_speed = motor_going_forward ? speed_magnitude : -speed_magnitude;
     }
   #else
     // Open-loop: assume we're at target speed (no feedback)
@@ -403,9 +418,17 @@ void printAdaptiveStatus() {
   
   Serial.print("PWM Output: ");
   Serial.println(pid_output, 1);
+
+  Serial.print("Measured Speed: ");
+  Serial.print(measured_speed, 2);
+  Serial.println(" m/s");
   Serial.println();
 
   // Jetson parseFeedbackLine() 이 파싱하는 형식
   Serial.print("SPEED:");
   Serial.println(measured_speed, 2);
+
+  // 캘리브레이션용 원시 엔코더 카운트 출력
+  Serial.print("ENC_RAW:");
+  Serial.println(encoder_count);
 }
