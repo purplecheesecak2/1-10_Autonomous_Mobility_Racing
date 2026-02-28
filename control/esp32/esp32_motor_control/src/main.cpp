@@ -61,10 +61,10 @@
 #define HIGH_SPEED_KI_SCALE   0.5
 #define HIGH_SPEED_KD_SCALE   1.2
 
-// Steering-based speed limiting
-#define STEERING_THRESHOLD    15.0  // degrees - 이 각도 이상이면 큰 조향
+// Steering-based speed limiting (ESP32에서 처리)
+#define STEERING_THRESHOLD    25.0  // degrees - 이 각도 이상이면 감쇄 시작
 #define MAX_STEERING_ANGLE    45.0  // degrees
-#define SPEED_REDUCTION_FACTOR 0.6  // 큰 조향 시 속도를 60%까지 제한
+#define SPEED_REDUCTION_FACTOR 0.8  // 최대 조향 시 속도를 80%까지 제한
 
 // ========== GLOBAL VARIABLES ==========
 Servo steeringServo;
@@ -232,11 +232,16 @@ void applyAdaptiveSpeedControl(float target_mps, float steering_deg) {
     speed_error_prev = speed_error;
 
     // Anti-windup
-    speed_error_sum = constrain(speed_error_sum, -10.0, 10.0);
+    speed_error_sum = constrain(speed_error_sum, -20.0, 20.0);
 
-    // Adaptive PID 적용
-    pid_output = current_kp * speed_error + 
-                 current_ki * speed_error_sum + 
+    // 피드포워드: 목표 속도를 PWM으로 직접 매핑 (즉각 응답)
+    // PID는 실제 오차만 보정
+    float feedforward = speedToPWM(adjusted_target_speed);
+
+    // Adaptive PID + Feedforward
+    pid_output = feedforward +
+                 current_kp * speed_error +
+                 current_ki * speed_error_sum +
                  current_kd * speed_error_derivative;
   #else
     // Open-loop: direct mapping from speed to PWM
@@ -428,7 +433,7 @@ void printAdaptiveStatus() {
   Serial.print("SPEED:");
   Serial.println(measured_speed, 2);
 
-  // 캘리브레이션용 원시 엔코더 카운트 출력
-  Serial.print("ENC_RAW:");
-  Serial.println(encoder_count);
+  // 캘리브레이션용 원시 엔코더 카운트 출력 (캘리브레이션 완료 후 주석 처리)
+  // Serial.print("ENC_RAW:");
+  // Serial.println(encoder_count);
 }
