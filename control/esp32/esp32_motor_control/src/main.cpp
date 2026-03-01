@@ -206,17 +206,10 @@ void readSerialCommands() {
 void applySteering(float steering_deg) {
   // Convert steering angle to servo angle
   // steering_deg: -45 to +45 (left to right)
-  // servo: SERVO_MIN_ANGLE to SERVO_MAX_ANGLE
+  // Symmetric mapping around SERVO_CENTER: ±SERVO_RANGE degrees
+  #define SERVO_RANGE 30  // degrees each side from center
 
-  float servo_angle;
-  if (steering_deg >= 0) {
-    // 오른쪽: CENTER → MAX
-    servo_angle = SERVO_CENTER + (steering_deg / 45.0) * (SERVO_MAX_ANGLE - SERVO_CENTER);
-  } else {
-    // 왼쪽: CENTER → MIN
-    servo_angle = SERVO_CENTER + (steering_deg / 45.0) * (SERVO_CENTER - SERVO_MIN_ANGLE);
-  }
-
+  float servo_angle = SERVO_CENTER + (steering_deg / 45.0) * SERVO_RANGE;
   servo_angle = constrain(servo_angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   steeringServo.write((int)servo_angle);
 }
