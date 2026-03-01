@@ -40,7 +40,7 @@
 // 측정 방법: 바퀴를 정확히 1회전시키고 시리얼 모니터의 "ENC_RAW:" 값을 확인
 // ENCODER_PPR = 그 값으로 교체
 #define ENCODER_PPR           139        // 캘리브레이션 완료 (5회전 측정: 695펄스 ÷ 5)
-#define WHEEL_CIRCUMFERENCE_M 0.3456f   // π × 0.11m (바퀴 지름 11cm)
+#define WHEEL_CIRCUMFERENCE_M 0.2042f   // π × 0.065m (바퀴 지름 6.5cm)
 
 // ========== ADAPTIVE PID CONFIGURATION ==========
 // Base PID gains (tune these first!)
