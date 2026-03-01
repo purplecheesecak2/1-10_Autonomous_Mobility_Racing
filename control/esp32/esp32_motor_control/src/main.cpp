@@ -27,7 +27,7 @@
 // Steering limits (degrees)
 #define SERVO_MIN_ANGLE     60     // Adjust to your servo
 #define SERVO_MAX_ANGLE     120
-#define SERVO_CENTER        90
+#define SERVO_CENTER        85
 
 // Speed limits
 #define MAX_SPEED_MPS       3.0
@@ -208,8 +208,14 @@ void applySteering(float steering_deg) {
   // steering_deg: -45 to +45 (left to right)
   // servo: SERVO_MIN_ANGLE to SERVO_MAX_ANGLE
 
-  float servo_angle = map(steering_deg * 100, -4500, 4500,
-                          SERVO_MIN_ANGLE * 100, SERVO_MAX_ANGLE * 100) / 100.0;
+  float servo_angle;
+  if (steering_deg >= 0) {
+    // 오른쪽: CENTER → MAX
+    servo_angle = SERVO_CENTER + (steering_deg / 45.0) * (SERVO_MAX_ANGLE - SERVO_CENTER);
+  } else {
+    // 왼쪽: CENTER → MIN
+    servo_angle = SERVO_CENTER + (steering_deg / 45.0) * (SERVO_CENTER - SERVO_MIN_ANGLE);
+  }
 
   servo_angle = constrain(servo_angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   steeringServo.write((int)servo_angle);
