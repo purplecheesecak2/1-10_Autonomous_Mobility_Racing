@@ -89,6 +89,7 @@ float pid_output = 0.0;
 
 // Encoder (if available)
 volatile long encoder_count = 0;
+volatile long total_encoder_count = 0;  // 누적 카운트 (리셋 안 됨)
 float measured_speed = 0.0;
 bool motor_going_forward = true;  // 방향 추적 (속도 부호 결정용)
 
@@ -384,6 +385,7 @@ void updateSpeedMeasurement() {
 // Encoder interrupt
 void IRAM_ATTR encoderISR() {
   encoder_count++;
+  total_encoder_count++;
 }
 
 // ========== UTILITY FUNCTIONS ==========
@@ -432,7 +434,9 @@ void printAdaptiveStatus() {
   Serial.print("SPEED:");
   Serial.println(measured_speed, 2);
 
-  // 캘리브레이션용 원시 엔코더 카운트 출력 (캘리브레이션 완료 후 주석 처리)
-  // Serial.print("ENC_RAW:");
-  // Serial.println(encoder_count);
+  // 엔코더 확인용 출력
+  Serial.print("ENC_TOTAL:");
+  Serial.print(total_encoder_count);
+  Serial.print("  ROTATIONS:");
+  Serial.println((float)total_encoder_count / ENCODER_PPR, 2);
 }
