@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lane_follow</name>
+  <version>0.0.1</version>
+  <description>Camera-based lane following with Pure Pursuit</description>
+  <maintainer email="todo@todo.com">team</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>ackermann_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
